@@ -1,0 +1,14 @@
+{
+  "pads": {
+    "3": [
+      0.5,
+      1.0
+    ]
+  },
+  "axes": {
+    "pad_x_is": "+x",
+    "pad_y_is": "+y"
+  },
+  "vy_sign": -1.0,
+  "_help": "pads: pad number -> [x, y] centre in metres. Origin = back-right floor corner, x = forward, y = left. Measure real positions and edit if needed."
+}

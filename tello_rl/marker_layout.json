@@ -1,0 +1,40 @@
+{
+  "dictionary": "DICT_4X4_50",
+  "marker_size_m": 0.16,
+  "wall_x_m": 5.5,
+  "markers": {
+    "0": [
+      0.25,
+      0.9
+    ],
+    "1": [
+      0.75,
+      0.9
+    ],
+    "2": [
+      1.25,
+      0.9
+    ],
+    "3": [
+      1.75,
+      0.9
+    ],
+    "4": [
+      2.25,
+      0.9
+    ],
+    "5": [
+      2.75,
+      0.9
+    ],
+    "6": [
+      3.25,
+      0.9
+    ],
+    "7": [
+      3.75,
+      0.9
+    ]
+  },
+  "_help": "markers: id -> [y (m, from RIGHT edge of flight area, facing wall), centre height (m)]. marker_size_m = measured side of the printed BLACK square."
+}
