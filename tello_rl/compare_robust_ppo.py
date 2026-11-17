@@ -21,6 +21,7 @@ from stable_baselines3 import PPO
 
 from tello_env import TelloNavEnv
 from robust_obs import RobustObservationWrapper
+from boundary_safety import BoundarySafetyFilter
 
 
 BASELINE = "models/stage2_cam4/final_model.zip"
@@ -31,29 +32,40 @@ SCALES = [1.00, 0.95, 0.85, 0.75, 0.65]
 
 
 def physical_collision(env):
-    """Check collisions independently of the simulator's success flag."""
+    """
+    Detect physical collisions using the drone's true position.
+
+    Returns:
+        wall_collision: True if drone overlaps a room boundary.
+        obstacle_collision: True if drone overlaps an obstacle.
+    """
 
     pos = env.pos
 
-    wall = bool(
+    # Check collision with room boundaries
+    wall_collision = bool(
         np.any(pos < env.drone_r)
         or np.any(pos > env.room - env.drone_r)
     )
 
-    obstacle = False
+    # Check collision with obstacles
+    obstacle_collision = False
 
     if len(env.obs_pos):
-        obstacle = bool(
+        obstacle_collision = bool(
             np.any(
                 np.linalg.norm(env.obs_pos - pos, axis=1)
                 < env.obs_r + env.drone_r
             )
         )
 
-    return wall or obstacle
+    return wall_collision, obstacle_collision
 
 
-def run_episode(model, config, scale, seed, drift):
+def run_episode(
+    model, config, scale, seed, drift,
+    safety=False, correction_mode="reverse"
+):
     base_env = TelloNavEnv(**config)
 
     env = RobustObservationWrapper(
@@ -63,8 +75,21 @@ def run_episode(model, config, scale, seed, drift):
         drift_std=drift,
     )
 
+    safety_filter = None
+
+    if safety:
+        safety_filter = BoundarySafetyFilter(
+            room_size=config.get("room_size", (4.0, 4.0)),
+            max_speed=config.get("max_speed", 0.8),
+            drone_radius=config.get("drone_radius", 0.1),
+            correction_mode=correction_mode,
+        )
+
     try:
         obs, _ = env.reset(seed=seed)
+
+        if safety_filter is not None:
+            safety_filter.reset()
 
         # Record the initial geometry for consistency checks.
         initial_pos = base_env.pos.copy()
@@ -78,6 +103,11 @@ def run_episode(model, config, scale, seed, drift):
         while True:
             action, _ = model.predict(obs, deterministic=True)
 
+            if safety_filter is not None:
+                action, intervened = safety_filter.filter_action(
+                    obs, action
+                )
+
             obs, reward, terminated, truncated, info = env.step(action)
 
             true_dist = float(
@@ -90,7 +120,10 @@ def run_episode(model, config, scale, seed, drift):
                 )
             )
 
-            crashed = physical_collision(base_env)
+            wall_collision, obstacle_collision = physical_collision(base_env)
+
+            crashed = wall_collision or obstacle_collision
+
             true_arrival = true_dist < base_env.goal_radius
             estimated_arrival = estimated_dist < base_env.goal_radius
 
@@ -99,7 +132,12 @@ def run_episode(model, config, scale, seed, drift):
 
             # Physical collisions take precedence over arrival.
             if crashed:
-                outcome = "collision"
+                if wall_collision and obstacle_collision:
+                    outcome = "wall_and_obstacle_collision"
+                elif wall_collision:
+                    outcome = "wall_collision"
+                else:
+                    outcome = "obstacle_collision"
                 break
 
             if true_arrival:
@@ -121,11 +159,30 @@ def run_episode(model, config, scale, seed, drift):
             "scale": scale,
             "drift": drift,
             "outcome": outcome,
+
             "success": int(outcome == "success"),
-            "collision": int(outcome == "collision"),
+            "collision": int(outcome in (
+                "wall_collision",
+                "obstacle_collision",
+                "wall_and_obstacle_collision",
+            )),
+            "wall_collision": int(outcome in (
+                "wall_collision",
+                "wall_and_obstacle_collision",
+            )),
+            "obstacle_collision": int(outcome in (
+                "obstacle_collision",
+                "wall_and_obstacle_collision",
+            )),
             "false_arrival": int(outcome == "false_arrival"),
+
             "false_arrival_event": int(false_arrival_event),
             "timeout": int(outcome == "timeout"),
+            "safety_enabled": int(safety),
+            "safety_interventions": (
+                safety_filter.interventions
+                if safety_filter is not None else 0
+            ),
             "steps": base_env.steps,
             "flight_time_s": round(base_env.steps * base_env.dt, 3),
             "true_final_distance_m": round(true_dist, 4),
@@ -148,6 +205,17 @@ def main():
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--drift", type=float, default=0.0)
+    parser.add_argument(
+        "--safety",
+        action="store_true",
+        help="Enable experimental boundary safety filtering",
+    )
+    parser.add_argument(
+        "--correction-mode",
+        choices=["reverse", "clamp", "adaptive"],
+        default="reverse",
+        help="Boundary safety action correction strategy",
+    )
     parser.add_argument("--output", default="robust_comparison")
 
     args = parser.parse_args()
@@ -195,6 +263,8 @@ def main():
                     scale=scale,
                     seed=seed,
                     drift=args.drift,
+                    safety=args.safety,
+                    correction_mode=args.correction_mode,
                 )
 
                 result["model"] = model_name
@@ -203,6 +273,8 @@ def main():
 
             successes = sum(r["success"] for r in results)
             collisions = sum(r["collision"] for r in results)
+            wall_collisions = sum(r["wall_collision"] for r in results)
+            obstacle_collisions = sum(r["obstacle_collision"] for r in results)
             false_arrivals = sum(r["false_arrival"] for r in results)
             timeouts = sum(r["timeout"] for r in results)
 
@@ -218,6 +290,8 @@ def main():
                 f"{model_name:15s} | "
                 f"Success: {successes:3d}/{args.episodes} | "
                 f"Collision: {collisions:3d} | "
+                f"Wall: {wall_collisions:3d} | "
+                f"Obstacle: {obstacle_collisions:3d} | "
                 f"False arrival: {false_arrivals:3d} | "
                 f"Timeout: {timeouts:3d} | "
                 f"Final dist: {avg_distance:.2f} m | "
@@ -230,7 +304,9 @@ def main():
     fields = [
         "model", "seed", "scale", "drift",
         "outcome", "success", "collision",
+        "wall_collision", "obstacle_collision",
         "false_arrival", "false_arrival_event", "timeout",
+        "safety_enabled", "safety_interventions",
         "steps", "flight_time_s",
         "true_final_distance_m",
         "estimated_final_distance_m",
@@ -250,7 +326,9 @@ def main():
         fields = [
             "model", "scale", "episodes",
             "success_rate", "collision_rate",
+            "wall_collision_rate", "obstacle_collision_rate",
             "false_arrival_rate", "timeout_rate",
+            "avg_safety_interventions", "safety_intervention_rate",
             "avg_final_distance_m", "avg_flight_time_s",
         ]
 
@@ -275,11 +353,24 @@ def main():
                     "collision_rate": np.mean(
                         [r["collision"] for r in group]
                     ),
+                    "wall_collision_rate": np.mean(
+                        [r["wall_collision"] for r in group]
+                    ),
+                    "obstacle_collision_rate": np.mean(
+                        [r["obstacle_collision"] for r in group]
+                    ),
                     "false_arrival_rate": np.mean(
                         [r["false_arrival"] for r in group]
                     ),
                     "timeout_rate": np.mean(
                         [r["timeout"] for r in group]
+                    ),
+                    "avg_safety_interventions": np.mean(
+                        [r["safety_interventions"] for r in group]
+                    ),
+                    "safety_intervention_rate": (
+                        sum(r["safety_interventions"] for r in group)
+                        / max(1, sum(r["steps"] for r in group))
                     ),
                     "avg_final_distance_m": np.mean(
                         [r["true_final_distance_m"] for r in group]

@@ -1,0 +1,7 @@
+time_s,event
+0.0,hover_start
+2.003,hover_end
+2.003,forward_start
+3.504,forward_end
+3.504,settling_start
+6.506,settling_end
